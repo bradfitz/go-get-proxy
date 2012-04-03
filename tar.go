@@ -79,6 +79,13 @@ func makeTar(w io.Writer, workdir string) error {
 	tw := tar.NewWriter(zout)
 
 	err := filepath.Walk(workdir, filepath.WalkFunc(func(path string, fi os.FileInfo, err error) error {
+		if err != nil {
+			log.Printf("Error walking path %q: %v", path, err)
+		}
+		if fi == nil {
+			log.Printf("Odd: nil os.Fileinfo for path %q", path)
+			return nil
+		}
 		if !strings.HasPrefix(path, workdir) {
 			log.Panicf("walked filename %q doesn't begin with workdir %q", path, workdir)
 		}
@@ -87,6 +94,9 @@ func makeTar(w io.Writer, workdir string) error {
 		// Chop of any leading / from filename, leftover from removing workdir.
 		if strings.HasPrefix(name, "/") {
 			name = name[1:]
+		}
+		if name == modtimeFile {
+			return nil
 		}
 
 		if fi.IsDir() {

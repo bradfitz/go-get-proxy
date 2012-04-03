@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 )
+
+const modtimeFile = ".go-get-proxy-last"
 
 var (
 	listen = flag.String("listen", ":8080", "port, ip:port, or 'envfd:NAME' to listen on")
@@ -24,17 +27,22 @@ var (
 )
 
 func proxy(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-	switch path {
+	upath := r.URL.Path
+	switch upath {
 	case "/favicon.ico", "/robots.txt":
 		// TODO(brafitz): handle
 		return
 	}
-	if len(path) < 2 {
+	if len(upath) < 2 {
 		fmt.Fprintf(w, "<html><body>go get proxy</body></html>")
 		return
 	}
-	pkg := path[1:]
+	if path.Clean(upath) != upath {
+		log.Printf("invalid requested path %q", upath)
+		http.Error(w, "invalid path", 500)
+		return
+	}
+	pkg := upath[1:]
 
 	path, err := getPackage(pkg)
 	if err != nil {
@@ -79,7 +87,18 @@ func getPackage(pkg string) (pkgPath string, err error) {
 		return "", fmt.Errorf("Error running go get for package %q: %v\n\nOutput:\n%s", pkg, err, out)
 	}
 	log.Printf("Fetched package %q", pkg)
-	return filepath.Join(os.Getenv("GOPATH"), "src", filepath.FromSlash(pkg)), nil
+
+	root := filepath.Join(os.Getenv("GOPATH"), "src", filepath.FromSlash(pkg))
+	touchFile(filepath.Join(root, modtimeFile))
+	return root, nil
+}
+
+func touchFile(name string) {
+	os.Remove(name)
+	f, err := os.Create(name)
+	if err == nil {
+		f.Close()
+	}
 }
 
 func main() {
