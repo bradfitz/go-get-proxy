@@ -1,0 +1,1 @@
+appengine -> http -> go-get-proxy (this) -> {git,hg,svn,bzr} -> internet
