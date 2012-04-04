@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const modtimeFile = ".go-get-proxy-last"
@@ -59,7 +60,33 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+var goPathSrc = filepath.Join(os.Getenv("GOPATH"), "src")
+
+const newEnough = 1 * time.Minute
+
+func isNewEnough(dir string) (ret bool) {
+	topDir := dir
+	defer func() {
+		log.Printf("newEnough(%q) ... %q = %v", topDir, dir, ret)
+	}()
+	for len(dir) > len(goPathSrc) {
+		log.Printf("is %q new enough?", dir)
+		if fi, err := os.Stat(filepath.Join(dir, modtimeFile)); err == nil {
+			if time.Now().Sub(fi.ModTime()) < newEnough {
+				return true
+			}
+		}
+		dir = filepath.Join(dir, "..")
+	}
+	return false
+}
+
 func getPackage(pkg string) (pkgPath string, err error) {
+	root := filepath.Join(goPathSrc, filepath.FromSlash(pkg))
+	if isNewEnough(root) {
+		return root, nil
+	}
+
 	pendingMu.Lock()
 	c, ok := pending[pkg]
 	if !ok {
@@ -74,22 +101,14 @@ func getPackage(pkg string) (pkgPath string, err error) {
 	// only protecting the top level. the go get tool will go
 	// fetch dependencies that we don't see here.
 
-	args := []string{"get"}
-	if true {
-		args = append(args, "-u")
-	}
-	args = append(args, pkg)
-
 	log.Printf("Getting package %q...", pkg)
-	out, err := exec.Command("go", args...).CombinedOutput()
+	out, err := exec.Command("go", "get", "-u", pkg).CombinedOutput()
+	touchFile(filepath.Join(root, modtimeFile))
 	if err != nil {
-		log.Printf("Get of package %q failed: %v", err)
+		log.Printf("Get of package %q failed: %v; output: %s", pkg, err, out)
 		return "", fmt.Errorf("Error running go get for package %q: %v\n\nOutput:\n%s", pkg, err, out)
 	}
 	log.Printf("Fetched package %q", pkg)
-
-	root := filepath.Join(os.Getenv("GOPATH"), "src", filepath.FromSlash(pkg))
-	touchFile(filepath.Join(root, modtimeFile))
 	return root, nil
 }
 
