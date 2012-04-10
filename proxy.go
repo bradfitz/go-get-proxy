@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -65,14 +66,10 @@ var goPathSrc = filepath.Join(os.Getenv("GOPATH"), "src")
 const newEnough = 1 * time.Minute
 
 func isNewEnough(dir string) (ret bool) {
-	topDir := dir
-	defer func() {
-		log.Printf("newEnough(%q) ... %q = %v", topDir, dir, ret)
-	}()
 	for len(dir) > len(goPathSrc) {
-		log.Printf("is %q new enough?", dir)
 		if fi, err := os.Stat(filepath.Join(dir, modtimeFile)); err == nil {
 			if time.Now().Sub(fi.ModTime()) < newEnough {
+				log.Printf("Dir %s is new enough.", dir)
 				return true
 			}
 		}
@@ -82,11 +79,15 @@ func isNewEnough(dir string) (ret bool) {
 }
 
 func getPackage(pkg string) (pkgPath string, err error) {
-	root := filepath.Join(goPathSrc, filepath.FromSlash(pkg))
-	if isNewEnough(root) {
-		return root, nil
+	pkgPath = filepath.Join(goPathSrc, filepath.FromSlash(pkg))
+	if isNewEnough(pkgPath) {
+		return
 	}
 
+	// Only allow a package to be fetched once at a time.
+	// TODO(bradfitz): this isn't perfect synchronization. we're
+	// only protecting the top level. the go get tool will go
+	// fetch dependencies that we don't see here.
 	pendingMu.Lock()
 	c, ok := pending[pkg]
 	if !ok {
@@ -97,19 +98,60 @@ func getPackage(pkg string) (pkgPath string, err error) {
 	c <- true // blocks until buffer size of 1 is free
 	defer func() { <-c }()
 
-	// TODO(bradfitz): this isn't perfect synchronization. we're
-	// only protecting the top level. the go get tool will go
-	// fetch dependencies that we don't see here.
-
 	log.Printf("Getting package %q...", pkg)
-	out, err := exec.Command("go", "get", "-u", pkg).CombinedOutput()
-	touchFile(filepath.Join(root, modtimeFile))
+	cmd := exec.Command("go", "get", "-u", "-d", pkg)
+
+	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// TODO: set a global "last failure time" for this package (or up a level),
+		// so some expensive failure can't happen often quickly.
 		log.Printf("Get of package %q failed: %v; output: %s", pkg, err, out)
 		return "", fmt.Errorf("Error running go get for package %q: %v\n\nOutput:\n%s", pkg, err, out)
 	}
+
 	log.Printf("Fetched package %q", pkg)
-	return root, nil
+
+	// Figure out where its root is. The root is the highest level that still has
+	// a ".vcs" subdirectory.
+	root := pkgPath
+	svnSeen := false
+	for checkDir := root; ; {
+		dirHas := func(vcsDir string) bool {
+			fi, err := os.Stat(filepath.Join(checkDir, vcsDir))
+			return err == nil && fi.IsDir()
+		}
+		if dirHas(".svn") {
+			// Keep going up until we *don't* see an .svn directory.
+			svnSeen = true
+		} else if svnSeen {
+			break
+		}
+		root = checkDir
+		if dirHas(".hg") || dirHas(".git") || dirHas(".bzr") {
+			break
+		}
+		checkDir = filepath.Join(checkDir, "..")
+		if checkDir == root {
+			// No change?
+			return "", errors.New("confused; vcs file in root?")
+		}
+	}
+
+	log.Printf("root of %q is: %q", pkg, root)
+	filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
+		if err != nil || !fi.IsDir() {
+			return nil
+		}
+		switch filepath.Base(path) {
+		case ".svn", ".hg", ".git", ".bzr":
+			return filepath.SkipDir
+		}
+		tf := filepath.Join(path, modtimeFile)
+		touchFile(tf)
+		return nil
+	})
+
+	return pkgPath, nil
 }
 
 func touchFile(name string) {
