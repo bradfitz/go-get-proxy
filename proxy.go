@@ -4,6 +4,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -44,7 +45,15 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid path", 500)
 		return
 	}
+
 	pkg := upath[1:]
+
+	dir, file := path.Split(upath)
+	if strings.HasSuffix(file, ".go") {
+		pkg = dir[1 : len(dir)-1]
+	} else {
+		file = ""
+	}
 
 	path, err := getPackage(pkg)
 	if err != nil {
@@ -54,10 +63,25 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/x-tar")
-	err = makeTar(w, path)
-	if err != nil {
-		log.Printf("Error generating tar of %q: %v", path, err)
+	switch {
+	case file == "":
+		// Tar mode.
+		w.Header().Set("Content-Type", "application/x-tar")
+		err = makeTar(w, path)
+		if err != nil {
+			log.Printf("Error generating tar of %q: %v", path, err)
+		}
+		return
+	default:
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		f, err := os.Open(filepath.Join(path, file))
+		if err != nil {
+			w.WriteHeader(500)
+			fmt.Fprintf(w, err.Error())
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
 	}
 }
 
